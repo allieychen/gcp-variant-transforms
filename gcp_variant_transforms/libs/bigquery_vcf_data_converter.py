@@ -19,6 +19,8 @@ from __future__ import division
 
 import copy
 import json
+import sys
+
 from typing import Any, Dict, List  # pylint: disable=unused-import
 
 from gcp_variant_transforms.beam_io import vcfio
@@ -65,6 +67,114 @@ _NUM_CALL_SAMPLES = 5
 # this many calls.
 _MIN_NUM_CALLS_FOR_ROW_SIZE_ESTIMATION = 100
 
+class BigQueryCallRowGenerator(object):
+
+
+  def __init__(
+          self,
+          schema_descriptor,
+          # type: bigquery_schema_descriptor.SchemaDescriptor
+          conflict_resolver=None,
+          # type: vcf_field_conflict_resolver.ConflictResolver
+          null_numeric_value_replacement=None  # type: int
+  ):
+    # type: (...) -> None
+    self._schema_descriptor = schema_descriptor
+    self._conflict_resolver = conflict_resolver
+    self._bigquery_field_sanitizer = bigquery_sanitizer.FieldSanitizer(
+      null_numeric_value_replacement)
+
+  def get_rows(self, variant, allow_incompatible_records=False,
+               omit_empty_sample_calls=False):
+    num_calls_in_row = 0
+    for call in variant.calls:
+      call_record, empty = self._get_call_record(
+        call, self._schema_descriptor, allow_incompatible_records)
+      if omit_empty_sample_calls and empty:
+        continue
+      num_calls_in_row += 1
+      call_record.update({'date': '1981-01-05'})
+      call_record.update({'variant_id': variant._variant_id})
+      yield call_record
+
+
+  def _get_bigquery_field_entry(
+      self,
+      key,  # type: str
+      data,  # type: Union[Any, List[Any]]
+      schema_descriptor,  # type: bigquery_schema_descriptor.SchemaDescriptor
+      allow_incompatible_records,  # type: bool
+  ):
+    # type: (...) -> (str, Any)
+    if data is None:
+      return None, None
+    field_name = _BigQuerySchemaSanitizer.get_sanitized_field_name(key)
+    if not schema_descriptor.has_simple_field(field_name):
+      raise ValueError('BigQuery schema has no such field: {}.\n'
+                       'This can happen if the field is not defined in '
+                       'the VCF headers, or is not inferred automatically. '
+                       'Retry pipeline with --infer_headers.'
+                       .format(field_name))
+    sanitized_field_data = self._bigquery_field_sanitizer.get_sanitized_field(
+        data)
+    field_schema = schema_descriptor.get_field_descriptor(field_name)
+    field_data, is_compatible = self._check_and_resolve_schema_compatibility(
+        field_schema, sanitized_field_data)
+    if is_compatible or allow_incompatible_records:
+      return field_name, field_data
+    else:
+      raise ValueError('Value and schema do not match for field {}. '
+                       'Value: {} Schema: {}.'.format(
+                           field_name, sanitized_field_data, field_schema))
+
+  def _check_and_resolve_schema_compatibility(self, field_schema, field_data):
+    resolved_field_data = self._conflict_resolver.resolve_schema_conflict(
+        field_schema, field_data)
+    return resolved_field_data, resolved_field_data == field_data
+
+  def _is_empty_field(self, value):
+    return (value in (vcfio.MISSING_FIELD_VALUE, [vcfio.MISSING_FIELD_VALUE]) or
+            (not value and value != 0))
+
+
+  def _get_call_record(
+      self,
+      call,  # type: vcfio.VariantCall
+      call_record_schema_descriptor,
+      # type: bigquery_schema_descriptor.SchemaDescriptor
+      allow_incompatible_records,  # type: bool
+      ):
+    # type: (...) -> (Dict[str, Any], bool)
+    """A helper method for ``get_rows`` to get a call as JSON.
+
+    Args:
+      call: Variant call to convert.
+      call_record_schema_descriptor: Descriptor for the BigQuery schema of
+        call record.
+
+    Returns:
+      BigQuery call value (dict).
+    """
+    call_record = {
+        # bigquery_util.ColumnKeyConstants.CALLS_NAME:
+        #     self._bigquery_field_sanitizer.get_sanitized_field(call.name),
+        'call_' + bigquery_util.ColumnKeyConstants.CALLS_PHASESET: call.phaseset,
+        'call_' + bigquery_util.ColumnKeyConstants.CALLS_GENOTYPE: call.genotype or []
+    }
+    if call.call_id:
+      call_record.update({
+          sample_info_table_schema_generator.SAMPLE_ID: call.call_id})
+    is_empty = (not call.genotype or
+                set(call.genotype) == set((vcfio.MISSING_GENOTYPE_VALUE,)))
+    for key, data in call.info.iteritems():
+      if data is not None:
+        field_name, field_data = self._get_bigquery_field_entry(
+            'call_' + key, data, call_record_schema_descriptor,
+            allow_incompatible_records)
+        call_record[field_name] = field_data
+        is_empty = is_empty and self._is_empty_field(field_data)
+    return call_record, is_empty
+
 
 class BigQueryRowGenerator(object):
   """Class to generate BigQuery row from a variant."""
@@ -85,7 +195,8 @@ class BigQueryRowGenerator(object):
   def get_rows(self,
                variant,
                allow_incompatible_records=False,
-               omit_empty_sample_calls=False):
+               omit_empty_sample_calls=False,
+               no_call=False):
     # type: (processed_variant.ProcessedVariant, bool, bool) -> Dict
     """Yields BigQuery rows according to the schema from the given variant.
 
@@ -107,30 +218,34 @@ class BigQueryRowGenerator(object):
       ValueError: If variant data is inconsistent or invalid.
     """
     base_row = self._get_base_row_from_variant(
-        variant, allow_incompatible_records)
-    call_limit_per_row = self._get_call_limit_per_row(variant)
-    if call_limit_per_row < len(variant.calls):
-      # Keep base_row intact if we need to split rows.
-      row = copy.deepcopy(base_row)
+        variant, allow_incompatible_records, no_call)
+    base_row.update({'date': '1981-01-05'})
+    base_row.update({'file_id': variant.calls[0].file_id})
+    if no_call:
+      yield base_row
     else:
-      row = base_row
-
-    call_record_schema_descriptor = (
-        self._schema_descriptor.get_record_schema_descriptor(
-            bigquery_util.ColumnKeyConstants.CALLS))
-    num_calls_in_row = 0
-    for call in variant.calls:
-      call_record, empty = self._get_call_record(
-          call, call_record_schema_descriptor, allow_incompatible_records)
-      if omit_empty_sample_calls and empty:
-        continue
-      num_calls_in_row += 1
-      if num_calls_in_row > call_limit_per_row:
-        yield row
-        num_calls_in_row = 1
+      call_limit_per_row = self._get_call_limit_per_row(variant)
+      if call_limit_per_row < len(variant.calls):
+        # Keep base_row intact if we need to split rows.
         row = copy.deepcopy(base_row)
-      row[bigquery_util.ColumnKeyConstants.CALLS].append(call_record)
-    yield row
+      else:
+        row = base_row
+      call_record_schema_descriptor = (
+          self._schema_descriptor.get_record_schema_descriptor(
+              bigquery_util.ColumnKeyConstants.CALLS))
+      num_calls_in_row = 0
+      for call in variant.calls:
+        call_record, empty = self._get_call_record(
+            call, call_record_schema_descriptor, allow_incompatible_records)
+        if omit_empty_sample_calls and empty:
+          continue
+        num_calls_in_row += 1
+        if num_calls_in_row > call_limit_per_row:
+          yield row
+          num_calls_in_row = 1
+          row = copy.deepcopy(base_row)
+        row[bigquery_util.ColumnKeyConstants.CALLS].append(call_record)
+      yield row
 
   def _get_call_record(
       self,
@@ -151,14 +266,14 @@ class BigQueryRowGenerator(object):
       BigQuery call value (dict).
     """
     call_record = {
-        bigquery_util.ColumnKeyConstants.CALLS_NAME:
-            self._bigquery_field_sanitizer.get_sanitized_field(call.name),
+        # bigquery_util.ColumnKeyConstants.CALLS_NAME:
+        #     self._bigquery_field_sanitizer.get_sanitized_field(call.name),
         bigquery_util.ColumnKeyConstants.CALLS_PHASESET: call.phaseset,
         bigquery_util.ColumnKeyConstants.CALLS_GENOTYPE: call.genotype or []
     }
-    if call.sample_id:
+    if call.call_id:
       call_record.update({
-          sample_info_table_schema_generator.SAMPLE_ID: call.sample_id})
+          sample_info_table_schema_generator.SAMPLE_ID: call.call_id})
     is_empty = (not call.genotype or
                 set(call.genotype) == set((vcfio.MISSING_GENOTYPE_VALUE,)))
     for key, data in call.info.iteritems():
@@ -170,9 +285,10 @@ class BigQueryRowGenerator(object):
         is_empty = is_empty and self._is_empty_field(field_data)
     return call_record, is_empty
 
-  def _get_base_row_from_variant(self, variant, allow_incompatible_records):
+  def _get_base_row_from_variant(self, variant, allow_incompatible_records, no_calls):
     # type: (processed_variant.ProcessedVariant, bool) -> Dict[str, Any]
     row = {
+        'variant_id': variant._variant_id,
         bigquery_util.ColumnKeyConstants.REFERENCE_NAME: variant.reference_name,
         bigquery_util.ColumnKeyConstants.START_POSITION: variant.start,
         bigquery_util.ColumnKeyConstants.END_POSITION: variant.end,
@@ -205,7 +321,8 @@ class BigQueryRowGenerator(object):
         row[field_name] = field_data
 
     # Set calls to empty for now (will be filled later).
-    row[bigquery_util.ColumnKeyConstants.CALLS] = []
+    if not no_calls:
+      row[bigquery_util.ColumnKeyConstants.CALLS] = []
     return row
 
   def _get_bigquery_field_entry(

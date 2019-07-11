@@ -60,12 +60,60 @@ _CONSTANT_CALL_FIELDS = [bigquery_util.ColumnKeyConstants.CALLS_NAME,
 _CONSTANT_ALTERNATE_BASES_FIELDS = [
     bigquery_util.ColumnKeyConstants.ALTERNATE_BASES_ALT]
 
+def generate_call_schema(
+    header_fields,  # type: vcf_header_io.VcfHeader
+    proc_variant_factory,  # type: processed_variant.ProcessedVariantFactory
+    add_sample_id=False,  # type: bool
+    variant_merger=None,  # type: variant_merge_strategy.VariantMergeStrategy
+    no_call=False):
+  schema = bigquery.TableSchema()
+  schema.fields.append(bigquery.TableFieldSchema(
+    name='variant_id',
+    type=bigquery_util.TableFieldConstants.TYPE_INTEGER,
+    mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
+    description='Variant ID.'))
+
+  schema.fields.append(
+          sample_info_table_schema_generator.create_sample_id_field())
+  schema.fields.append(bigquery.TableFieldSchema(
+        name='call_' + bigquery_util.ColumnKeyConstants.CALLS_GENOTYPE,
+        type=bigquery_util.TableFieldConstants.TYPE_INTEGER,
+        mode=bigquery_util.TableFieldConstants.MODE_REPEATED,
+        description=('Genotype of the call. "-1" is used in cases where the '
+                     'genotype is not called.')))
+  schema.fields.append(bigquery.TableFieldSchema(
+        name='call_' +bigquery_util.ColumnKeyConstants.CALLS_PHASESET,
+        type=bigquery_util.TableFieldConstants.TYPE_STRING,
+        mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
+        description=('Phaseset of the call (if any). "*" is used in cases where '
+                     'the genotype is phased, but no phase set ("PS" in FORMAT) '
+                     'was specified.')))
+  for key, field in header_fields.formats.iteritems():
+      # GT and PS are already included in 'genotype' and 'phaseset' fields.
+      if key in (vcfio.GENOTYPE_FORMAT_KEY, vcfio.PHASESET_FORMAT_KEY):
+        continue
+      schema.fields.append(bigquery.TableFieldSchema(
+          name='call_' + bigquery_sanitizer.SchemaSanitizer.get_sanitized_field_name(key),
+          type=bigquery_util.get_bigquery_type_from_vcf_type(
+              field[_HeaderKeyConstants.TYPE]),
+          mode=bigquery_util.get_bigquery_mode_from_vcf_num(
+              field[_HeaderKeyConstants.NUM]),
+          description=bigquery_sanitizer.SchemaSanitizer.get_sanitized_string(
+              field[_HeaderKeyConstants.DESC])))
+
+  schema.fields.append(bigquery.TableFieldSchema(
+    name='date',
+    type="DATE",
+    mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
+    description='Partition date.'))
+  return schema
+
 
 def generate_schema_from_header_fields(
     header_fields,  # type: vcf_header_io.VcfHeader
     proc_variant_factory,  # type: processed_variant.ProcessedVariantFactory
-    add_sample_id=False,  # type: bool
-    variant_merger=None  # type: variant_merge_strategy.VariantMergeStrategy
+    variant_merger=None,  # type: variant_merge_strategy.VariantMergeStrategy
+    schema_version=0,
     ):
   # type: (...) -> bigquery.TableSchema
   """Returns a ``TableSchema`` for the BigQuery table storing variants.
@@ -81,6 +129,12 @@ def generate_schema_from_header_fields(
       strategies may change the schema, which is why this may be needed here.
   """
   schema = bigquery.TableSchema()
+  # if schema_version == 1:
+  schema.fields.append(bigquery.TableFieldSchema(
+      name='variant_id',
+      type=bigquery_util.TableFieldConstants.TYPE_INTEGER,
+      mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
+      description='Variant ID.'))
   schema.fields.append(bigquery.TableFieldSchema(
       name=bigquery_util.ColumnKeyConstants.REFERENCE_NAME,
       type=bigquery_util.TableFieldConstants.TYPE_STRING,
@@ -125,45 +179,48 @@ def generate_schema_from_header_fields(
                    'variant has passed all filters.')))
 
   # Add calls.
-  calls_record = bigquery.TableFieldSchema(
+  if schema_version == 0:
+    calls_record = bigquery.TableFieldSchema(
       name=bigquery_util.ColumnKeyConstants.CALLS,
       type=bigquery_util.TableFieldConstants.TYPE_RECORD,
       mode=bigquery_util.TableFieldConstants.MODE_REPEATED,
       description='One record for each call.')
-  calls_record.fields.append(bigquery.TableFieldSchema(
-      name=bigquery_util.ColumnKeyConstants.CALLS_NAME,
-      type=bigquery_util.TableFieldConstants.TYPE_STRING,
-      mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
-      description='Name of the call.'))
-  if add_sample_id:
-    calls_record.fields.append(
-        sample_info_table_schema_generator.create_sample_id_field())
-  calls_record.fields.append(bigquery.TableFieldSchema(
-      name=bigquery_util.ColumnKeyConstants.CALLS_GENOTYPE,
-      type=bigquery_util.TableFieldConstants.TYPE_INTEGER,
-      mode=bigquery_util.TableFieldConstants.MODE_REPEATED,
-      description=('Genotype of the call. "-1" is used in cases where the '
-                   'genotype is not called.')))
-  calls_record.fields.append(bigquery.TableFieldSchema(
-      name=bigquery_util.ColumnKeyConstants.CALLS_PHASESET,
-      type=bigquery_util.TableFieldConstants.TYPE_STRING,
-      mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
-      description=('Phaseset of the call (if any). "*" is used in cases where '
-                   'the genotype is phased, but no phase set ("PS" in FORMAT) '
-                   'was specified.')))
-  for key, field in header_fields.formats.iteritems():
-    # GT and PS are already included in 'genotype' and 'phaseset' fields.
-    if key in (vcfio.GENOTYPE_FORMAT_KEY, vcfio.PHASESET_FORMAT_KEY):
-      continue
     calls_record.fields.append(bigquery.TableFieldSchema(
-        name=bigquery_sanitizer.SchemaSanitizer.get_sanitized_field_name(key),
-        type=bigquery_util.get_bigquery_type_from_vcf_type(
-            field[_HeaderKeyConstants.TYPE]),
-        mode=bigquery_util.get_bigquery_mode_from_vcf_num(
-            field[_HeaderKeyConstants.NUM]),
-        description=bigquery_sanitizer.SchemaSanitizer.get_sanitized_string(
-            field[_HeaderKeyConstants.DESC])))
-  schema.fields.append(calls_record)
+        name='call_id',
+        type=bigquery_util.TableFieldConstants.TYPE_INTEGER,
+        mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
+        description='ID of the call.'))
+    # calls_record.fields.append(bigquery.TableFieldSchema(
+    #     name=bigquery_util.ColumnKeyConstants.CALLS_NAME,
+    #     type=bigquery_util.TableFieldConstants.TYPE_STRING,
+    #     mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
+    #     description='Name of the call.'))
+    calls_record.fields.append(bigquery.TableFieldSchema(
+        name=bigquery_util.ColumnKeyConstants.CALLS_GENOTYPE,
+        type=bigquery_util.TableFieldConstants.TYPE_INTEGER,
+        mode=bigquery_util.TableFieldConstants.MODE_REPEATED,
+        description=('Genotype of the call. "-1" is used in cases where the '
+                     'genotype is not called.')))
+    calls_record.fields.append(bigquery.TableFieldSchema(
+        name=bigquery_util.ColumnKeyConstants.CALLS_PHASESET,
+        type=bigquery_util.TableFieldConstants.TYPE_STRING,
+        mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
+        description=('Phaseset of the call (if any). "*" is used in cases where '
+                     'the genotype is phased, but no phase set ("PS" in FORMAT) '
+                     'was specified.')))
+    for key, field in header_fields.formats.iteritems():
+      # GT and PS are already included in 'genotype' and 'phaseset' fields.
+      if key in (vcfio.GENOTYPE_FORMAT_KEY, vcfio.PHASESET_FORMAT_KEY):
+        continue
+      calls_record.fields.append(bigquery.TableFieldSchema(
+          name=bigquery_sanitizer.SchemaSanitizer.get_sanitized_field_name(key),
+          type=bigquery_util.get_bigquery_type_from_vcf_type(
+              field[_HeaderKeyConstants.TYPE]),
+          mode=bigquery_util.get_bigquery_mode_from_vcf_num(
+              field[_HeaderKeyConstants.NUM]),
+          description=bigquery_sanitizer.SchemaSanitizer.get_sanitized_string(
+              field[_HeaderKeyConstants.DESC])))
+    schema.fields.append(calls_record)
 
   # Add info fields.
   info_keys = set()
@@ -188,6 +245,17 @@ def generate_schema_from_header_fields(
     info_keys.add(key)
   if variant_merger:
     variant_merger.modify_bigquery_schema(schema, info_keys)
+  if schema_version == 1:
+    schema.fields.append(bigquery.TableFieldSchema(
+      name='file_id',
+      type=bigquery_util.TableFieldConstants.TYPE_INTEGER,
+      mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
+      description=('File ID')))
+    schema.fields.append(bigquery.TableFieldSchema(
+      name='date',
+      type="DATE",
+      mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
+      description='Partition date.'))
   return schema
 
 

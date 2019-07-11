@@ -35,6 +35,7 @@ REQUIRED_PACKAGES = [
     # and version 1.14.0 resolves the dependency conflicts.
     'google-cloud-storage<=1.14.0',
     'cityhash'
+    'pyfarmhash'
 ]
 
 REQUIRED_SETUP_PACKAGES = [

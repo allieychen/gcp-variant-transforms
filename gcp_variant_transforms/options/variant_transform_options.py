@@ -146,6 +146,15 @@ class BigQueryWriteOptions(VariantTransformsOptions):
     parser.add_argument('--output_table',
                         default='',
                         help='BigQuery table to store the results.')
+    parser.add_argument(
+      '--schema_version',
+      type=int, default=0,
+      help=('If true, a sample id will be added to uniquely identifies a '
+            'call. Meanwhile, a sample info table with the name '
+            'output_table + {} will be created, which contains the sample id '
+            'and the file path. This is helpful if you want to distinguish '
+            'between calls (e.g., having the same call name)').format(
+        self._SAMPLE_INFO_APPENDIX))
 
     parser.add_argument(
         '--create_sample_info_table',

@@ -18,8 +18,9 @@ from apache_beam.io.gcp.internal.clients import bigquery
 
 from gcp_variant_transforms.libs import bigquery_util
 
-SAMPLE_ID = 'sample_id'
+SAMPLE_ID = 'call_id'
 FILE_PATH = 'file_path'
+FILE_ID = 'file_id'
 
 
 def generate_schema():
@@ -27,10 +28,20 @@ def generate_schema():
   schema = bigquery.TableSchema()
   schema.fields.append(create_sample_id_field())
   schema.fields.append(bigquery.TableFieldSchema(
+      name='call_name',
+      type=bigquery_util.TableFieldConstants.TYPE_STRING,
+      mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
+      description=('Name of the sample.')))
+  schema.fields.append(bigquery.TableFieldSchema(
       name=FILE_PATH,
       type=bigquery_util.TableFieldConstants.TYPE_STRING,
       mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
       description=('File path of the sample.')))
+  schema.fields.append(bigquery.TableFieldSchema(
+    name=FILE_ID,
+    type=bigquery_util.TableFieldConstants.TYPE_INTEGER,
+    mode=bigquery_util.TableFieldConstants.MODE_NULLABLE,
+    description=('File id of the file.')))
   return schema
 
 

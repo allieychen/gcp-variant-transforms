@@ -39,7 +39,8 @@ from gcp_variant_transforms.libs import bigquery_sanitizer
 from gcp_variant_transforms.libs import infer_headers_util
 from gcp_variant_transforms.libs.annotation import annotation_parser
 from gcp_variant_transforms.libs.annotation.vep import descriptions
-
+import cityhash
+import sys
 _FIELD_COUNT_ALTERNATE_ALLELE = 'A'
 
 # An alias for the header key constants to make referencing easier.
@@ -77,6 +78,7 @@ class ProcessedVariant(object):
     self._variant = variant
     self._non_alt_info = {}  # type: Dict[str, Any]
     self._alternate_datas = []  # type: List[AlternateBaseData]
+    self._variant_id = None
     for a in variant.alternate_bases:
       self._alternate_datas.append(AlternateBaseData(a))
 
@@ -264,7 +266,22 @@ class ProcessedVariantFactory(object):
         self._add_per_alt_info(proc_var, key, variant_info_data)
       else:
         proc_var._non_alt_info[key] = variant_info_data
+    proc_var._variant_id = self._get_variant_id(proc_var)
     return proc_var
+
+  def _get_variant_id(self, variant):
+    alt = ''
+    if variant.alternate_data_list:
+      alt = ','.join([alternate._alt_bases for alternate in variant.alternate_data_list])
+    key = ':'.join(
+      [str(x) for x in [
+        variant.reference_name or '',
+        variant.start or '',
+        variant.end or '',
+        variant.reference_bases or '',
+        alt]])
+    return cityhash.CityHash64(key) - sys.maxint - 1
+
 
   def _add_per_alt_info(self, proc_var, field_name, variant_info_data):
     # type: (ProcessedVariant, str, vcfio.VariantInfo) -> None

@@ -38,7 +38,7 @@ import logging
 import sys
 import tempfile
 from typing import Dict, List, Optional  # pylint: disable=unused-import
-
+import farmhash
 import apache_beam as beam
 from apache_beam import pvalue  # pylint: disable=unused-import
 from apache_beam.io import filesystems
@@ -399,13 +399,77 @@ def _create_sample_info_table(pipeline,  # type: beam.Pipeline
                                                     known_args.append))
 
 
+def _write_to_bigquery_v1(variants,
+                          pipeline,
+                          pipeline_mode,
+                          known_args,
+                          file_path_to_file_hash,
+                          table_name,
+                          header_fields,
+                          variant_merger,
+                          processed_variant_factory):
+  _create_sample_info_table(pipeline, pipeline_mode, known_args,
+                            file_path_to_file_hash)
+  _ = (variants | 'CallToBigQuery' >>
+       variant_to_bigquery.CallToBigQuery(
+         table_name,
+         header_fields,
+         variant_merger,
+         processed_variant_factory,
+         append=known_args.append,
+         update_schema_on_append=known_args.update_schema_on_append,
+         allow_incompatible_records=known_args.allow_incompatible_records,
+         omit_empty_sample_calls=known_args.omit_empty_sample_calls,
+         num_bigquery_write_shards=known_args.num_bigquery_write_shards,
+         null_numeric_value_replacement=(
+           known_args.null_numeric_value_replacement)))
+  _ = (variants | 'VariantToBigQuery' >>
+       variant_to_bigquery.VariantToBigQuery(
+         table_name,
+         header_fields,
+         variant_merger,
+         processed_variant_factory,
+         file_path_to_file_hash=file_path_to_file_hash,
+         append=known_args.append,
+         update_schema_on_append=known_args.update_schema_on_append,
+         allow_incompatible_records=known_args.allow_incompatible_records,
+         omit_empty_sample_calls=known_args.omit_empty_sample_calls,
+         num_bigquery_write_shards=known_args.num_bigquery_write_shards,
+         null_numeric_value_replacement=(
+           known_args.null_numeric_value_replacement),
+         schema_version=1))
+
+
+def _write_to_bigquery_v0(variants,
+                          table_name,
+                          header_fields,
+                          variant_merger,
+                          processed_variant_factory, known_args,
+                          file_path_to_file_hash):
+  _ = (variants | 'VariantToBigQuery' >>
+       variant_to_bigquery.VariantToBigQuery(
+         table_name,
+         header_fields,
+         variant_merger,
+         processed_variant_factory,
+         file_path_to_file_hash=file_path_to_file_hash,
+         append=known_args.append,
+         update_schema_on_append=known_args.update_schema_on_append,
+         allow_incompatible_records=known_args.allow_incompatible_records,
+         omit_empty_sample_calls=known_args.omit_empty_sample_calls,
+         num_bigquery_write_shards=known_args.num_bigquery_write_shards,
+         null_numeric_value_replacement=(
+           known_args.null_numeric_value_replacement),
+         schema_version=0))
+
+
 def run(argv=None):
   # type: (List[str]) -> None
   """Runs VCF to BigQuery pipeline."""
   logging.info('Command: %s', ' '.join(argv or sys.argv))
   known_args, pipeline_args = pipeline_common.parse_args(argv,
                                                          _COMMAND_LINE_OPTIONS)
-
+  # print farmhash.fingerprint64('abc')
   if known_args.auto_flags_experiment:
     _get_input_dimensions(known_args, pipeline_args)
 
@@ -454,9 +518,6 @@ def run(argv=None):
       pipeline_options.GoogleCloudOptions)
   file_path_to_file_hash = pipeline_common.create_file_path_to_file_hash_map(
       known_args.all_patterns, google_cloud_options.project)
-  if known_args.create_sample_info_table:
-    _create_sample_info_table(pipeline, pipeline_mode, known_args,
-                              file_path_to_file_hash)
 
   variants = _read_variants(all_patterns, pipeline, known_args, pipeline_mode,
                             file_path_to_file_hash)
@@ -496,20 +557,24 @@ def run(argv=None):
       if partitioner and partitioner.get_partition_name(i):
         table_suffix = '_' + partitioner.get_partition_name(i)
       table_name = known_args.output_table + table_suffix
-      _ = (variants[i] | 'VariantToBigQuery' + table_suffix >>
-           variant_to_bigquery.VariantToBigQuery(
-               table_name,
-               header_fields,
-               variant_merger,
-               processed_variant_factory,
-               append=known_args.append,
-               update_schema_on_append=known_args.update_schema_on_append,
-               allow_incompatible_records=known_args.allow_incompatible_records,
-               omit_empty_sample_calls=known_args.omit_empty_sample_calls,
-               num_bigquery_write_shards=known_args.num_bigquery_write_shards,
-               null_numeric_value_replacement=(
-                   known_args.null_numeric_value_replacement),
-               add_sample_id=known_args.create_sample_info_table))
+      if known_args.schema_version == 1:
+        _write_to_bigquery_v1(variants[i],
+                              pipeline,
+                              pipeline_mode,
+                              known_args,
+                              file_path_to_file_hash,
+                              table_name,
+                              header_fields,
+                              variant_merger,
+                              processed_variant_factory)
+      else:
+        _write_to_bigquery_v0(variants[i],
+                              table_name,
+                              header_fields,
+                              variant_merger,
+                              processed_variant_factory,
+                              known_args,
+                              file_path_to_file_hash)
 
   if known_args.output_avro_path:
     # TODO(bashir2): Add an integration test that outputs to Avro files and
@@ -536,5 +601,5 @@ def run(argv=None):
 
 
 if __name__ == '__main__':
-  logging.getLogger().setLevel(logging.INFO)
+  logging.getLogger().setLevel(logging.DEBUG)
   run()
